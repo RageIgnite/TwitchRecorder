@@ -1,3 +1,3 @@
-TwitchRecorder is a program written in Python. It scans the provided users periodically from users.txt for twitch usernames and records streams using ffmpeg. Usernames in `users.txt` should be listed and separated by commas (e.g., user1,user2,user3). The files are then saved to an mp4 file.
+TwitchRecorder is a program written in Python. It scans the provided users periodically from users.txt for twitch usernames and records streams using streamlink. Usernames in `users.txt` should be listed and separated by commas (e.g., user1,user2,user3). The files are then saved to an mp4 file.
 
 The script will prompt you for your Twitch Client ID and Client Secret on first run (or if credentials fail). These will be stored in a `credentials.json` file in the same directory, so you don't have to enter them every time. Do not share your `credentials.json` file or commit it to version control if this is a public repository.
