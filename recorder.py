@@ -11,9 +11,15 @@ import configparser
 import logging
 import logging.handlers
 import re
+import signal # Added for FFmpeg graceful shutdown
 
 # --- Global logger instance ---
 logger = logging.getLogger('TwitchRecorder')
+
+# --- FFmpeg Shutdown Constants ---
+FFMPEG_GRACEFUL_SHUTDOWN_TIMEOUT_Q = 15  # Seconds for 'q' command
+FFMPEG_SIGNAL_TIMEOUT = 10  # Seconds for SIGINT/CTRL_BREAK_EVENT
+FFMPEG_TERMINATE_TIMEOUT = 10  # Seconds for SIGTERM
 
 # --- Default Configuration Values ---
 DEFAULT_FFMPEG_PATH = ""
@@ -304,13 +310,27 @@ def start_recording(username, config, stream_title=None):
     
     try:
         logger.info(f"Starting recording for {username}. Output: {output_path}")
+        
+        popen_kwargs = {
+            'stdin': subprocess.PIPE, # For sending 'q'
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.PIPE
+        }
+        if os.name == 'nt':
+            popen_kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs['start_new_session'] = True
+
         # Hide stream URL from logs for privacy/security
-        logger.debug(f"FFmpeg command for {username}: {[ffmpeg_executable, '-i', '******', '-c', 'copy', output_path, '-loglevel', 'warning']}")
+        # Create a log-safe version of the command
+        log_safe_ffmpeg_cmd = [ffmpeg_executable, "-i", "******", "-c", "copy", output_path, "-loglevel", "warning"]
+        logger.debug(f"FFmpeg command for {username}: {log_safe_ffmpeg_cmd}")
+        
         ffmpeg_cmd = [ffmpeg_executable, "-i", stream_url, "-c", "copy", output_path, "-loglevel", "warning"]
-        process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(ffmpeg_cmd, **popen_kwargs)
         
         return {'process': process, 'started_at': now, 'output_path': output_path, 'username': username}
-    except FileNotFoundError: # If ffmpeg_executable path is somehow invalid at Popen stage
+    except FileNotFoundError:
         logger.error(f"FFmpeg executable not found at path '{ffmpeg_executable}' for user {username}. Recording not started.", exc_info=True)
         return None
     except subprocess.SubprocessError as e: # More general subprocess error
@@ -321,7 +341,7 @@ def start_recording(username, config, stream_title=None):
         return None
 
 def stop_recording(process_info):
-    """Stops a recording process, providing context-specific messages."""
+    """Stops an FFmpeg recording process gracefully, trying multiple methods."""
     if not process_info or 'process' not in process_info:
         logger.error("stop_recording called with invalid process_info.")
         return
@@ -330,39 +350,104 @@ def stop_recording(process_info):
     username = process_info.get('username', 'UnknownUser')
     output_path = process_info.get('output_path', 'N/A')
 
-    try:
-        logger.info(f"Stopping recording for {username} (Output: {output_path}).")
-        process.terminate()
-        
-        try:
-            stdout, stderr = process.communicate(timeout=10) 
-            logger.info(f"FFmpeg process for {username} terminated gracefully.")
-            if stdout: 
-                logger.debug(f"FFmpeg STDOUT (on stop) for {username}: {stdout.decode(errors='ignore').strip()}")
-            if stderr: # FFmpeg often logs to stderr even for info
-                logger.debug(f"FFmpeg STDERR (on stop) for {username}: {stderr.decode(errors='ignore').strip()}")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"FFmpeg process for {username} (PID {process.pid}, Output: {output_path}) did not terminate in time. Sending SIGKILL.")
-            process.kill()
-            stdout, stderr = process.communicate() 
-            if stdout:
-                logger.debug(f"FFmpeg STDOUT (on kill) for {username}: {stdout.decode(errors='ignore').strip()}")
-            if stderr:
-                logger.debug(f"FFmpeg STDERR (on kill) for {username}: {stderr.decode(errors='ignore').strip()}")
-        except Exception as comm_err:
-             logger.error(f"Error during FFmpeg process communicate for {username}: {comm_err}", exc_info=True)
-    
-    except ProcessLookupError:
-        logger.warning(f"FFmpeg process for {username} (PID {process.pid}, Output: {output_path}) not found. Already terminated?", exc_info=True)
-    except Exception as e: 
-        logger.error(f"Error stopping FFmpeg process for {username} (PID {process.pid}, Output: {output_path}): {e}", exc_info=True)
-        if process.poll() is None: 
-            try:
-                logger.warning(f"Attempting to kill FFmpeg process for {username} (PID {process.pid}) due to prior error.")
-                process.kill()
-            except Exception as kill_err:
-                logger.error(f"Failed to kill FFmpeg process for {username} (PID {process.pid}) after error: {kill_err}", exc_info=True)
+    if process.poll() is not None:
+        logger.info(f"FFmpeg process for {username} (Output: {output_path}) already terminated with code {process.returncode}.")
+        return
 
+    # 1. Try sending 'q'
+    logger.info(f"Attempting graceful shutdown for {username} (Output: {output_path}) by sending 'q' to FFmpeg stdin...")
+    try:
+        if process.stdin and not process.stdin.closed:
+            process.stdin.write(b'q') 
+            process.stdin.flush()
+            process.stdin.close() 
+            logger.debug(f"Sent 'q' and closed FFmpeg stdin for {username}.")
+        else:
+            logger.warning(f"FFmpeg stdin not available or already closed for {username}. Cannot send 'q'.")
+            raise IOError("FFmpeg stdin not available")
+
+        stdout, stderr = process.communicate(timeout=FFMPEG_GRACEFUL_SHUTDOWN_TIMEOUT_Q)
+        logger.info(f"FFmpeg for {username} (Output: {output_path}) exited gracefully (RC {process.returncode}) after 'q' command.")
+        if stdout: logger.debug(f"FFmpeg STDOUT (on 'q' stop) for {username}: {stdout.decode(errors='ignore').strip()}")
+        if stderr: logger.debug(f"FFmpeg STDERR (on 'q' stop) for {username}: {stderr.decode(errors='ignore').strip()}")
+        return 
+    except subprocess.TimeoutExpired:
+        logger.warning(f"'q' command for FFmpeg {username} (Output: {output_path}) timed out. FFmpeg did not exit within {FFMPEG_GRACEFUL_SHUTDOWN_TIMEOUT_Q}s.")
+    except (OSError, BrokenPipeError, IOError) as e: 
+        logger.warning(f"Error interacting with FFmpeg stdin for {username} (Output: {output_path}): {e}. FFmpeg might have exited, or stdin was unusable.")
+    except Exception as e: 
+        logger.error(f"Unexpected error during 'q' shutdown for {username} (Output: {output_path}): {e}", exc_info=True)
+
+    if process.poll() is not None: 
+        logger.info(f"FFmpeg process for {username} (Output: {output_path}) terminated during or shortly after 'q' attempt with RC {process.returncode}.")
+        return
+
+    # 2. Try SIGINT (Ctrl+C equivalent for FFmpeg) or CTRL_BREAK_EVENT on Windows
+    signal_to_try_name = "CTRL_BREAK_EVENT" if os.name == 'nt' else "SIGINT"
+    logger.info(f"Attempting to stop FFmpeg for {username} (Output: {output_path}) with {signal_to_try_name}...")
+    try:
+        if os.name == 'nt':
+            process.send_signal(signal.CTRL_BREAK_EVENT) 
+            logger.info(f"Sent CTRL_BREAK_EVENT to FFmpeg process group for {username}.")
+        else:
+            # Ensure process group leader for sending signal to the whole group if Popen used start_new_session=True
+            # However, os.kill with process.pid should send to the main process, which FFmpeg should handle.
+            # If FFmpeg spawns children that don't handle SIGINT from parent, this might need adjustment
+            # to os.killpg(os.getpgid(process.pid), signal.SIGINT) if start_new_session was used.
+            # For now, assume process.pid is sufficient for FFmpeg's SIGINT handling.
+            os.kill(process.pid, signal.SIGINT)
+            logger.info(f"Sent SIGINT to FFmpeg PID {process.pid} for {username}.")
+        
+        stdout, stderr = process.communicate(timeout=FFMPEG_SIGNAL_TIMEOUT)
+        logger.info(f"FFmpeg for {username} (Output: {output_path}) exited with RC {process.returncode} after {signal_to_try_name}.")
+        if stdout: logger.debug(f"FFmpeg STDOUT (on {signal_to_try_name} stop) for {username}: {stdout.decode(errors='ignore').strip()}")
+        if stderr: logger.debug(f"FFmpeg STDERR (on {signal_to_try_name} stop) for {username}: {stderr.decode(errors='ignore').strip()}")
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning(f"FFmpeg for {username} (Output: {output_path}) did not respond to {signal_to_try_name} within {FFMPEG_SIGNAL_TIMEOUT}s.")
+    except ProcessLookupError: 
+         logger.warning(f"FFmpeg process for {username} (Output: {output_path}) not found during {signal_to_try_name} attempt. Already terminated?", exc_info=True)
+         return 
+    except Exception as e:
+        logger.error(f"Error sending {signal_to_try_name} to FFmpeg for {username} (Output: {output_path}): {e}", exc_info=True)
+
+    if process.poll() is not None:
+        logger.info(f"FFmpeg process for {username} (Output: {output_path}) terminated during or shortly after {signal_to_try_name} attempt with RC {process.returncode}.")
+        return
+
+    # 3. Fallback to SIGTERM (terminate)
+    logger.info(f"Attempting to stop FFmpeg for {username} (Output: {output_path}) with SIGTERM...")
+    try:
+        process.terminate() 
+        stdout, stderr = process.communicate(timeout=FFMPEG_TERMINATE_TIMEOUT)
+        logger.info(f"FFmpeg for {username} (Output: {output_path}) exited with RC {process.returncode} after SIGTERM.")
+        if stdout: logger.debug(f"FFmpeg STDOUT (on SIGTERM stop) for {username}: {stdout.decode(errors='ignore').strip()}")
+        if stderr: logger.debug(f"FFmpeg STDERR (on SIGTERM stop) for {username}: {stderr.decode(errors='ignore').strip()}")
+        return
+    except subprocess.TimeoutExpired:
+        logger.warning(f"FFmpeg for {username} (Output: {output_path}) did not respond to SIGTERM within {FFMPEG_TERMINATE_TIMEOUT}s. Killing process.")
+    except ProcessLookupError:
+         logger.warning(f"FFmpeg process for {username} (Output: {output_path}) not found during SIGTERM attempt. Already terminated?", exc_info=True)
+         return 
+    except Exception as e:
+        logger.error(f"Error sending SIGTERM to FFmpeg for {username} (Output: {output_path}): {e}. Attempting to kill.", exc_info=True)
+
+    if process.poll() is not None:
+        logger.info(f"FFmpeg process for {username} (Output: {output_path}) terminated during or shortly after SIGTERM attempt with RC {process.returncode}.")
+        return
+        
+    # 4. Fallback to SIGKILL (kill)
+    logger.info(f"Attempting to kill FFmpeg for {username} (Output: {output_path}) with SIGKILL...")
+    try:
+        process.kill() 
+        stdout, stderr = process.communicate() 
+        logger.info(f"FFmpeg for {username} (Output: {output_path}) process killed. RC: {process.returncode}.")
+        if stdout: logger.debug(f"FFmpeg STDOUT (on SIGKILL) for {username}: {stdout.decode(errors='ignore').strip()}")
+        if stderr: logger.debug(f"FFmpeg STDERR (on SIGKILL) for {username}: {stderr.decode(errors='ignore').strip()}")
+    except ProcessLookupError:
+         logger.warning(f"FFmpeg process for {username} (Output: {output_path}) not found during SIGKILL attempt. Already terminated?", exc_info=True)
+    except Exception as e:
+        logger.error(f"Error killing FFmpeg process for {username} (Output: {output_path}): {e}", exc_info=True)
 
 def load_credentials():
     """Load saved Twitch credentials from credentials.json (legacy)."""
