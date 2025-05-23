@@ -1,0 +1,19 @@
+# Credentials files - IMPORTANT: DO NOT COMMIT THESE IF THEY CONTAIN SECRETS
+credentials.json
+config.ini
+
+# Log files
+*.log
+recorder.log
+
+# Python cache files and compiled files
+__pycache__/
+*.pyc
+
+# Default recordings directory
+recordings/
+
+# Test-related (if any generated, e.g. coverage reports)
+.coverage
+htmlcov/
+.pytest_cache/
