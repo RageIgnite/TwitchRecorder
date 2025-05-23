@@ -433,7 +433,7 @@ def main():
     # --- Setup Logging (based on config) ---
     log_level = config.get('TwitchRecorder', 'log_level', fallback=DEFAULT_LOG_LEVEL)
     log_file = config.get('TwitchRecorder', 'log_file', fallback=DEFAULT_LOG_FILE)
-    quiet_mode = config.getboolean('TwitchRecorder', 'quiet_mode', fallback=config.getboolean('TwitchRecorder', DEFAULT_QUIET_MODE))
+    quiet_mode = config.getboolean('TwitchRecorder', 'quiet_mode', fallback=(DEFAULT_QUIET_MODE.lower() == 'true'))
     setup_logging(log_level_str=log_level, log_file=log_file, quiet_mode=quiet_mode)
     
     logger.info("TwitchRecorder script initialized with full logging.")
