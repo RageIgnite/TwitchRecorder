@@ -6,6 +6,32 @@ import requests
 import subprocess
 import streamlink
 import json  # Added for credentials handling
+import shutil
+
+def get_ffmpeg_path():
+    """Determines the path to the ffmpeg executable."""
+    ffmpeg_path_env = os.environ.get("FFMPEG_PATH")
+
+    if ffmpeg_path_env:
+        if os.path.isfile(ffmpeg_path_env):
+            return ffmpeg_path_env
+        elif os.path.isdir(ffmpeg_path_env):
+            # Check for ffmpeg or ffmpeg.exe in the directory
+            exe_name = "ffmpeg.exe" if os.name == 'nt' else "ffmpeg"
+            potential_path = os.path.join(ffmpeg_path_env, exe_name)
+            if os.path.isfile(potential_path):
+                return potential_path
+            else: # Also check for ffmpeg without .exe on Windows, just in case
+                potential_path_no_ext = os.path.join(ffmpeg_path_env, "ffmpeg")
+                if os.name == 'nt' and os.path.isfile(potential_path_no_ext):
+                    return potential_path_no_ext
+    
+    # If FFMPEG_PATH is not set or doesn't lead to a valid executable, try shutil.which
+    ffmpeg_in_path = shutil.which("ffmpeg")
+    if ffmpeg_in_path:
+        return ffmpeg_in_path
+
+    return None
 
 def read_users():
     """Reads the list of users from 'users.txt', prompting for input if the file is missing or empty."""
@@ -118,15 +144,20 @@ def start_recording(username):
     os.makedirs(directory, exist_ok=True)
     
     now = datetime.now()
-    filename = f"{directory}/{now.strftime('%Y-%m-%d-%H-%M-%S')}_{username}.mp4"
+    filename = os.path.join(directory, f"{now.strftime('%Y-%m-%d-%H-%M-%S')}_{username}.mp4")
     
     stream_url = get_stream_url(username)
     if not stream_url:
         print(f"Could not find suitable stream URL for {username}")
         return None
+
+    ffmpeg_executable = get_ffmpeg_path()
+    if not ffmpeg_executable:
+        print("ffmpeg not found. Please install it and ensure it's in your PATH, or set the FFMPEG_PATH environment variable.")
+        return None
     
     try:
-        ffmpeg_cmd = ["ffmpeg", "-i", stream_url, "-c", "copy", filename, "-loglevel", "warning"]
+        ffmpeg_cmd = [ffmpeg_executable, "-i", stream_url, "-c", "copy", filename, "-loglevel", "warning"]
         process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         
         return {
