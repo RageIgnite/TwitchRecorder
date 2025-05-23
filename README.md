@@ -14,6 +14,7 @@ TwitchRecorder is a Python script that periodically scans a list of Twitch usern
 *   **Detailed Logging**: Outputs to both console and a rotating log file (`recorder.log`).
     *   Configurable log level and a "quiet mode" for console output.
 *   **Error Handling**: Includes specific messages for common issues and attempts token re-authentication.
+*   **Graceful Shutdown**: Robust handling of program interruption (e.g., Ctrl+C) to help ensure video files are properly finalized by FFmpeg.
 
 ## Prerequisites
 
@@ -222,6 +223,12 @@ TwitchRecorder provides detailed logging to help you understand its activity and
     *   Check `recorder.log` for detailed error messages from Streamlink or FFmpeg.
     *   The user might not actually be live, or the stream quality specified might be unavailable (though Streamlink usually falls back).
     *   Ensure the output directory is writable.
+
+*   **Video files are unplayable or corrupted**:
+    *   This can happen if the recording process is not finalized correctly. The improved shutdown handling (Ctrl+C) aims to minimize this.
+    *   Check `recorder.log` for any FFmpeg errors reported during the recording or shutdown sequence.
+    *   Ensure you have enough disk space in the `output_directory`.
+    *   If using post-processing, verify the command isn't corrupting the file or moving it before it's fully written.
 
 *   **Post-processing command not working**:
     *   Check `recorder.log` for the exact command executed and any stdout/stderr output.
